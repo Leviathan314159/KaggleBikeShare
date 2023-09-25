@@ -174,9 +174,55 @@ preg_log_export <- data.frame("datetime" = as.character(format(bike_test$datetim
                               "count" = exp(preg_log_predictions$.pred))
 
 
+# Automatic parameter tuning ------------------------------------
+auto_preg_model <- linear_reg(penalty = tune(),
+                              mixture = tune()) |> 
+  set_engine("glmnet")
+
+# Set the workflow
+auto_preg_wf <- workflow() |> 
+  add_recipe(preg_log_recipe) |> 
+  add_model(auto_preg_model)
+
+# Create a grid of values to iteratively tune
+tuning_grid <- grid_regular(penalty(), mixture(), levels = 10)
+
+# Split the data for cross validation
+folds <- vfold_cv(data = bike, v = 10, repeats = 1)
+
+# Run the cross validation
+cv_results <- auto_preg_wf |> 
+  tune_grid(resamples = folds,
+            grid = tuning_grid,
+            metrics = metric_set(rmse, mae, rsq))
+
+# Plot the results to visualize
+collect_metrics(cv_results) |> 
+  filter(.metric == "rmse") %>% 
+  ggplot(data = ., aes(x = penalty, y = mean, color = factor(mixture))) + 
+  geom_line()
+
+# It looks like the best tuning parameters are around lambda = 0.10, nu = 0.25
+# Apply the tuning parameters
+preg_auto_log <- linear_reg(penalty = 0.10, mixture = 0.25) |> 
+  set_engine("glmnet")
+auto_preg_log_workflow <- workflow() |> 
+  add_recipe(preg_log_recipe) |> 
+  add_model(preg_auto_log) |> 
+  fit(data = log_bike)
+
+# Predictions
+auto_preg_log_predictions <- predict(auto_preg_log_workflow, new_data = bike_test)
+auto_preg_log_predictions
+
+# Transform back from log
+auto_preg_log_export <- data.frame("datetime" = as.character(format(bike_test$datetime)),
+                              "count" = exp(auto_preg_log_predictions$.pred))
+
 # Write the data -----------------------
 vroom_write(bike_lm_predictions_export, "C:/Users/BYU Rental/STAT348/KaggleBikeShare/lm_submission.csv", delim = ",")
 vroom_write(bike_poisson_export, "C:/Users/BYU Rental/STAT348/KaggleBikeShare/poisson_submission.csv", delim = ",")
 vroom_write(log_model_export, "C:/Users/BYU Rental/STAT348/KaggleBikeShare/log_count_submission.csv", delim = ",")
 vroom_write(preg_export, "C:/Users/BYU Rental/STAT348/KaggleBikeShare/penalized_submission.csv", delim = ",")
 vroom_write(preg_log_export, "C:/Users/BYU Rental/STAT348/KaggleBikeShare/penalized_log_submission.csv", delim = ",")
+vroom_write(auto_preg_log_export, "C:/Users/BYU Rental/STAT348/KaggleBikeShare/autotuned_penalized_log_count.csv", delim = ",")
