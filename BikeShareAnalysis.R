@@ -6,10 +6,12 @@ library(vroom)
 library(tidymodels)
 library(poissonreg)
 library(glmnet)
+library(rpart)
 
 # Read in the data -----------------------------------
-bike <- vroom("C:/Users/BYU Rental/STAT348/KaggleBikeShare/train.csv")
-bike_test <- vroom("C:/Users/BYU Rental/STAT348/KaggleBikeShare/test.csv")
+base_folder <- "C:/Users/BYU Rental/STAT348/KaggleBikeShare/"
+bike <- vroom(paste(base_folder, "train.csv"))
+bike_test <- vroom(paste(base_folder, "test.csv"))
 
 # Data Cleaning -------------------------------------
 
@@ -76,6 +78,16 @@ preg_log_recipe <- recipe(count ~ ., data = log_bike) |>
   step_dummy(all_nominal_predictors()) |> 
   step_rm(datetime) |> 
   step_normalize(all_numeric_predictors()) # Standardizes the variables  
+
+tree_log_recipe <- recipe(count ~ ., data = log_bike) |> 
+  # Basic data cleaning and formatting 
+  # (minimal feature engineering for decision tree)
+  step_mutate(weather = if_else(weather == 4, 3, weather)) |> 
+  step_time(datetime, features="hour") |> 
+  step_mutate(season = factor(season)) |> 
+  step_mutate(holiday = factor(holiday)) |> 
+  step_mutate(workingday = factor(workingday)) |> 
+  step_mutate(weather = factor(weather))
 
 # Linear Regression ----------------------------------------
 # Set up the linear model
@@ -219,10 +231,71 @@ auto_preg_log_predictions
 auto_preg_log_export <- data.frame("datetime" = as.character(format(bike_test$datetime)),
                               "count" = exp(auto_preg_log_predictions$.pred))
 
+
+# Regression tree (log-count) ------------------------------
+
+tree_log_model <- decision_tree(tree_depth = tune(),
+                                cost_complexity = tune(),
+                                min_n = tune()) |> 
+  set_engine("rpart") |> 
+  set_mode("regression")
+
+# Workflow
+tree_log_wf <- workflow() |> 
+  add_recipe(tree_log_recipe) |> 
+  add_model(tree_log_model)
+
+# Set up the grid of tuning values
+?grid_regular
+tree_tuning_grid <- grid_regular(tree_depth(), cost_complexity(), 
+                                 min_n(), levels = 5)
+
+# Set up K-fold CV
+tree_folds <- vfold_cv(data = log_bike, v = 10, repeats = 1)
+
+# Find best tuning parameters
+tree_cv_results <- tree_log_wf |> 
+  tune_grid(resamples = tree_folds,
+            grid = tree_tuning_grid,
+            metrics = metric_set(rmse, mae, rsq))
+
+# Plot the results to visualize
+# Keep in mind that we need to observe all three metrics:
+# tree_depth, cost_complexity, and min_n
+collect_metrics(tree_cv_results) |> 
+  filter(.metric == "rmse") %>% 
+  ggplot(data = ., aes(x = tree_depth, y = mean, color = factor(cost_complexity), shape = factor(min_n))) + 
+  geom_point()
+
+# Finalize the workflow using the best tuning parameters and predict
+# The best tuning parametrics I got were:
+# tree_depth = 15
+# cost_complexity = 3.16227766016838e-06
+# min_n = 21
+tree_log_model <- decision_tree(tree_depth = 15,
+                                cost_complexity = 3.16227766016838e-06,
+                                min_n = 21) |> 
+  set_engine("rpart") |> 
+  set_mode("regression")
+
+tree_log_wf <- workflow() |> 
+  add_recipe(tree_log_recipe) |> 
+  add_model(tree_log_model) |> 
+  fit(data = log_bike)
+
+tree_log_predictions <- predict(tree_log_wf, new_data = bike_test)
+tree_log_predictions
+
+# Prepare the data for export
+tree_log_export <- data.frame("datetime" = as.character(format(bike_test$datetime)),
+                              "count" = exp(tree_log_predictions$.pred))
+
 # Write the data -----------------------
-vroom_write(bike_lm_predictions_export, "C:/Users/BYU Rental/STAT348/KaggleBikeShare/lm_submission.csv", delim = ",")
-vroom_write(bike_poisson_export, "C:/Users/BYU Rental/STAT348/KaggleBikeShare/poisson_submission.csv", delim = ",")
-vroom_write(log_model_export, "C:/Users/BYU Rental/STAT348/KaggleBikeShare/log_count_submission.csv", delim = ",")
-vroom_write(preg_export, "C:/Users/BYU Rental/STAT348/KaggleBikeShare/penalized_submission.csv", delim = ",")
-vroom_write(preg_log_export, "C:/Users/BYU Rental/STAT348/KaggleBikeShare/penalized_log_submission.csv", delim = ",")
-vroom_write(auto_preg_log_export, "C:/Users/BYU Rental/STAT348/KaggleBikeShare/autotuned_penalized_log_count.csv", delim = ",")
+# See above for the base folder. The rest of the name is the file name and extension.
+vroom_write(bike_lm_predictions_export, paste(base_folder, "lm_submission.csv"), delim = ",")
+vroom_write(bike_poisson_export, paste(base_folder, "poisson_submission.csv"), delim = ",")
+vroom_write(log_model_export, paste(base_folder, "log_count_submission.csv"), delim = ",")
+vroom_write(preg_export, paste(base_folder, "penalized_submission.csv"), delim = ",")
+vroom_write(preg_log_export, paste(base_folder, "penalized_log_submission.csv"), delim = ",")
+vroom_write(auto_preg_log_export, paste(base_folder, "autotuned_penalized_log_count.csv"), delim = ",")
+vroom_write(tree_log_export, paste(base_folder, "tree_log_count.csv"), delim = ",")
