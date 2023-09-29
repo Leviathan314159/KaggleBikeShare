@@ -7,11 +7,12 @@ library(tidymodels)
 library(poissonreg)
 library(glmnet)
 library(rpart)
+library(ranger)
 
 # Read in the data -----------------------------------
 base_folder <- "C:/Users/BYU Rental/STAT348/KaggleBikeShare/"
-bike <- vroom(paste(base_folder, "train.csv"))
-bike_test <- vroom(paste(base_folder, "test.csv"))
+bike <- vroom(paste0(base_folder, "train.csv"))
+bike_test <- vroom(paste0(base_folder, "test.csv"))
 
 # Data Cleaning -------------------------------------
 
@@ -290,12 +291,65 @@ tree_log_predictions
 tree_log_export <- data.frame("datetime" = as.character(format(bike_test$datetime)),
                               "count" = exp(tree_log_predictions$.pred))
 
+# Random Forest ---------------------------
+
+# Set the model
+forest_model <- rand_forest(mtry = tune(),
+                            min_n = tune(),
+                            trees = 500) |> 
+  set_engine("ranger") |> 
+  set_mode("regression")
+
+# Create a workflow
+forest_wf <- workflow() |> 
+  add_recipe(tree_log_recipe) |> 
+  add_model(forest_model) # |> 
+  # fit(data = log_bike)
+
+# Set up the grid with the tuning values
+forest_grid <- grid_regular(mtry(range = c(1, (length(log_bike)-1))), min_n())
+
+# Set up the K-fold CV
+forest_folds <- vfold_cv(data = log_bike, v = 10, repeats = 1)
+
+# Find best tuning parameters
+forest_cv_results <- forest_wf |> 
+  tune_grid(resamples = forest_folds,
+            grid = forest_grid,
+            metrics = metric_set(rmse, mae, rsq))
+
+collect_metrics(forest_cv_results) |> 
+  filter(.metric == "rmse") %>% 
+  ggplot(data = ., aes(x = mtry, y = mean, color = factor(min_n))) + 
+  geom_point()
+
+# Finalize the workflow using the best tuning parameters and predict
+# The best parameters were mtry = 9 and min_n = 2
+forest_final_model <- rand_forest(mtry = 9,
+                            min_n = 2,
+                            trees = 500) |> 
+  set_engine("ranger") |> 
+  set_mode("regression")
+
+forest_final_wf <- workflow() |> 
+  add_recipe(tree_log_recipe) |> 
+  add_model(forest_final_model) |> 
+  fit(data = log_bike)
+
+forest_predictions <- predict(forest_final_wf, new_data = bike_test)
+forest_predictions
+
+forest_export <- data.frame("datetime" = as.character(format(bike_test$datetime)),
+                            "count" = exp(forest_predictions$.pred))
+
+
 # Write the data -----------------------
 # See above for the base folder. The rest of the name is the file name and extension.
-vroom_write(bike_lm_predictions_export, paste(base_folder, "lm_submission.csv"), delim = ",")
-vroom_write(bike_poisson_export, paste(base_folder, "poisson_submission.csv"), delim = ",")
-vroom_write(log_model_export, paste(base_folder, "log_count_submission.csv"), delim = ",")
-vroom_write(preg_export, paste(base_folder, "penalized_submission.csv"), delim = ",")
-vroom_write(preg_log_export, paste(base_folder, "penalized_log_submission.csv"), delim = ",")
-vroom_write(auto_preg_log_export, paste(base_folder, "autotuned_penalized_log_count.csv"), delim = ",")
-vroom_write(tree_log_export, paste(base_folder, "tree_log_count.csv"), delim = ",")
+vroom_write(bike_lm_predictions_export, paste0(base_folder, "lm_submission.csv"), delim = ",")
+vroom_write(bike_poisson_export, paste0(base_folder, "poisson_submission.csv"), delim = ",")
+vroom_write(log_model_export, paste0(base_folder, "log_count_submission.csv"), delim = ",")
+vroom_write(preg_export, paste0(base_folder, "penalized_submission.csv"), delim = ",")
+vroom_write(preg_log_export, paste0(base_folder, "penalized_log_submission.csv"), delim = ",")
+vroom_write(auto_preg_log_export, paste0(base_folder, "autotuned_penalized_log_count.csv"), delim = ",")
+vroom_write(tree_log_export, paste0(base_folder, "tree_log_count.csv"), delim = ",")
+vroom_write(forest_export, paste0(base_folder, "forest_log_count.csv"), delim = ",")
