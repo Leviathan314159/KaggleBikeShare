@@ -19,6 +19,8 @@ bike_test <- vroom(paste0(base_folder, "test.csv"))
 # Remove the "casual" and "registered" columns from the training data
 # (they don't exist in the testing data)
 bike <- bike |> select(-casual, -registered)
+log_bike <- bike
+log_bike$count <- log(log_bike$count)
 
 # Feature Engineering --------------------------------------
 glimpse(bike)
@@ -52,8 +54,6 @@ penalized_recipe <- recipe(count ~ ., data = bike) |>
   step_normalize(all_numeric_predictors()) # Standardizes the variables
 
 # Recipe for fitting log-count to the predictors
-log_bike <- bike
-log_bike$count <- log(log_bike$count)
 log_recipe <- recipe(count ~ ., data = log_bike) |> 
   step_mutate(weather = if_else(weather == 4, 3, weather)) |> 
   # Reassign the few data points that are weather category 4
@@ -89,6 +89,20 @@ tree_log_recipe <- recipe(count ~ ., data = log_bike) |>
   step_mutate(holiday = factor(holiday)) |> 
   step_mutate(workingday = factor(workingday)) |> 
   step_mutate(weather = factor(weather))
+
+stack_recipe <- recipe(count ~ ., data = log_bike) |> 
+  step_mutate(weather = if_else(weather == 4, 3, weather)) |> 
+  # Reassign the few data points that are weather category 4
+  step_time(datetime, features="hour") |> 
+  step_mutate(season = factor(season)) |> 
+  step_mutate(holiday = factor(holiday)) |> 
+  step_mutate(workingday = factor(workingday)) |> 
+  step_mutate(weather = factor(weather)) |> 
+  step_mutate(windspeed_squared = windspeed**2) |> 
+  step_mutate(atemp_squared = atemp**2) |> 
+  step_rm(datetime) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_normalize(all_numeric_predictors()) # Standardizes the variables
 
 # Linear Regression ----------------------------------------
 # Set up the linear model
@@ -343,6 +357,89 @@ forest_export <- data.frame("datetime" = as.character(format(bike_test$datetime)
                             "count" = exp(forest_predictions$.pred))
 
 
+# Model Stacking -------------------------------
+library(stacks)
+# Split the data for CV
+stack_folds <- vfold_cv(log_bike, v = 10, repeats = 1)
+
+# Create a control grid
+untuned_model <- control_stack_grid()
+tuned_model <- control_stack_resamples()
+
+# Adding penalized regression models
+stack_preg_model <- linear_reg(penalty = tune(),
+                               mixture = tune()) |> 
+  set_engine("glmnet")
+
+# Adding decision tree models
+stack_tree_model <- decision_tree(tree_depth = tune(),
+                                  cost_complexity = tune(),
+                                  min_n = tune()) |> 
+  set_engine("rpart") |> 
+  set_mode("regression")
+
+# Set up workflows
+stack_preg_wf <- workflow() |> 
+  add_recipe(stack_recipe) |> 
+  add_model(stack_preg_model)
+
+stack_tree_wf <- workflow() |> 
+  add_recipe(stack_recipe) |> 
+  add_model(stack_tree_model)
+
+# Grid of values to tune over
+stack_preg_tuning_grid <- grid_regular(penalty(),
+                                       mixture(),
+                                       levels = 5)
+stack_tree_tuning_grid <- grid_regular(tree_depth(),
+                                       cost_complexity(),
+                                       min_n(),
+                                       levels = 5)
+
+# Run the CV
+stack_preg_models <- stack_preg_wf |> 
+  tune_grid(resamples = stack_folds,
+            grid = stack_preg_tuning_grid,
+            metrics = metric_set(rmse, mae, rsq),
+            control = untuned_model)
+stack_tree_models <- stack_tree_wf |> 
+  tune_grid(resamples = stack_folds,
+            grid = stack_tree_tuning_grid,
+            metrics = metric_set(rmse, mae, rsq),
+            control = untuned_model)
+
+# Create other resampling objects using other ML algorithms
+stack_lin_reg <- linear_reg() |> 
+  set_engine("lm")
+stack_lin_reg_wf <- workflow() |> 
+  add_recipe(stack_recipe) |> 
+  add_model(stack_lin_reg)
+stack_lin_reg_model <- fit_resamples(stack_lin_reg_wf,
+                                     resamples = stack_folds,
+                                     metrics = metric_set(rmse),
+                                     control = tuned_model)
+
+# Specify which models to include
+stack_prep <- stacks() |> 
+  add_candidates(stack_preg_models) |> 
+  add_candidates(stack_lin_reg_model) |> 
+  add_candidates(stack_tree_models)
+
+# Fit the stacked model
+stack_model <- stack_prep |> 
+  blend_predictions() |> 
+  fit_members()
+
+# Make predictions using the stacked data
+stack_predictions <- stack_model |> predict(new_data = bike_test)
+stack_predictions
+
+# Prepare the predictions for export
+stack_export <- data.frame("datetime" = as.character(bike_test$datetime),
+                           "count" = exp(stack_predictions$.pred))
+# FIXME:: These predictions are wild. They are way too high.
+# I need to go back and figure out what's going on.
+
 # Write the data -----------------------
 # See above for the base folder. The rest of the name is the file name and extension.
 vroom_write(bike_lm_predictions_export, paste0(base_folder, "lm_submission.csv"), delim = ",")
@@ -353,3 +450,4 @@ vroom_write(preg_log_export, paste0(base_folder, "penalized_log_submission.csv")
 vroom_write(auto_preg_log_export, paste0(base_folder, "autotuned_penalized_log_count.csv"), delim = ",")
 vroom_write(tree_log_export, paste0(base_folder, "tree_log_count.csv"), delim = ",")
 vroom_write(forest_export, paste0(base_folder, "forest_log_count.csv"), delim = ",")
+vroom_write(stack_export, paste0(base_folder, "stacked_log_count.csv"), delim = ",")
