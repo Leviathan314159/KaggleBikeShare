@@ -8,6 +8,8 @@ library(poissonreg)
 library(glmnet)
 library(rpart)
 library(ranger)
+library(DataExplorer)
+library(parsnip)
 
 # Read in the data -----------------------------------
 base_folder <- "C:/Users/BYU Rental/STAT348/KaggleBikeShare/"
@@ -18,6 +20,15 @@ bike_test <- vroom(paste0(base_folder, "test.csv"))
 
 # Remove the "casual" and "registered" columns from the training data
 # (they don't exist in the testing data)
+# Create separate dataframes for the casual counts and the registered counts
+casual_log_bike <- bike |> select(-count, -registered) |> 
+  mutate(casual = if_else(casual == 0, 1e-100, 0))
+casual_log_bike$casual <- log(casual_log_bike$casual)
+registered_log_bike <- bike |> select(-count, -casual) |> 
+  mutate(registered = if_else(registered == 0, 1e-100, 0))
+registered_log_bike$registered <- log(registered_log_bike$registered)
+casual_bike <- bike |> select(-count, -registered)
+registered_bike <- bike |> select(-count, -casual)
 bike <- bike |> select(-casual, -registered)
 log_bike <- bike
 log_bike$count <- log(log_bike$count)
@@ -28,6 +39,7 @@ bike_recipe <- recipe(count ~ ., data = bike) |>
   step_mutate(weather = if_else(weather == 4, 3, weather)) |> 
   # Reassign the few data points that are weather category 4
   step_time(datetime, features="hour") |> 
+  step_mutate(datetime_year = year(datetime)) |> 
   step_mutate(season = factor(season)) |> 
   step_mutate(holiday = factor(holiday)) |> 
   step_mutate(workingday = factor(workingday)) |> 
@@ -43,6 +55,7 @@ penalized_recipe <- recipe(count ~ ., data = bike) |>
   step_mutate(weather = if_else(weather == 4, 3, weather)) |> 
   # Reassign the few data points that are weather category 4
   step_time(datetime, features="hour") |> 
+  step_mutate(datetime_year = year(datetime)) |> 
   step_mutate(season = factor(season)) |> 
   step_mutate(holiday = factor(holiday)) |> 
   step_mutate(workingday = factor(workingday)) |> 
@@ -58,6 +71,7 @@ log_recipe <- recipe(count ~ ., data = log_bike) |>
   step_mutate(weather = if_else(weather == 4, 3, weather)) |> 
   # Reassign the few data points that are weather category 4
   step_time(datetime, features="hour") |> 
+  step_mutate(datetime_year = year(datetime)) |> 
   step_mutate(season = factor(season)) |> 
   step_mutate(holiday = factor(holiday)) |> 
   step_mutate(workingday = factor(workingday)) |> 
@@ -70,6 +84,7 @@ preg_log_recipe <- recipe(count ~ ., data = log_bike) |>
   step_mutate(weather = if_else(weather == 4, 3, weather)) |> 
   # Reassign the few data points that are weather category 4
   step_time(datetime, features="hour") |> 
+  step_mutate(datetime_year = year(datetime)) |> 
   step_mutate(season = factor(season)) |> 
   step_mutate(holiday = factor(holiday)) |> 
   step_mutate(workingday = factor(workingday)) |> 
@@ -85,6 +100,7 @@ tree_log_recipe <- recipe(count ~ ., data = log_bike) |>
   # (minimal feature engineering for decision tree)
   step_mutate(weather = if_else(weather == 4, 3, weather)) |> 
   step_time(datetime, features="hour") |> 
+  step_mutate(datetime_year = year(datetime)) |> 
   step_mutate(season = factor(season)) |> 
   step_mutate(holiday = factor(holiday)) |> 
   step_mutate(workingday = factor(workingday)) |> 
@@ -94,6 +110,7 @@ stack_recipe <- recipe(count ~ ., data = log_bike) |>
   step_mutate(weather = if_else(weather == 4, 3, weather)) |> 
   # Reassign the few data points that are weather category 4
   step_time(datetime, features="hour") |> 
+  step_mutate(datetime_year = year(datetime)) |> 
   step_mutate(season = factor(season)) |> 
   step_mutate(holiday = factor(holiday)) |> 
   step_mutate(workingday = factor(workingday)) |> 
@@ -103,6 +120,7 @@ stack_recipe <- recipe(count ~ ., data = log_bike) |>
   step_rm(datetime) |> 
   step_dummy(all_nominal_predictors()) |> 
   step_normalize(all_numeric_predictors()) # Standardizes the variables
+
 
 # Linear Regression ----------------------------------------
 # Set up the linear model
@@ -437,8 +455,31 @@ stack_predictions
 # Prepare the predictions for export
 stack_export <- data.frame("datetime" = as.character(bike_test$datetime),
                            "count" = exp(stack_predictions$.pred))
-# FIXME:: These predictions are wild. They are way too high.
-# I need to go back and figure out what's going on.
+
+
+# Designing a model to get under 0.44 on Kaggle ---------------------------
+# The closest I got was with a random forest model.
+
+
+
+# Trying the bart model -----------------------
+# Set the model
+bart_model <- bart(trees = 500) |> 
+  set_engine("dbarts") |> 
+  set_mode("regression")
+
+# Create a workflow
+bart_wf <- workflow() |> 
+  add_recipe(tree_log_recipe) |> 
+  add_model(bart_model) |> 
+  fit(data = log_bike)
+
+# Make predictions
+bart_predictions <- predict(bart_wf, new_data = bike_test)
+bart_predictions
+
+bart_export <- data.frame("datetime" = as.character(format(bike_test$datetime)),
+                          "count" = exp(bart_predictions$.pred))
 
 # Write the data -----------------------
 # See above for the base folder. The rest of the name is the file name and extension.
@@ -451,3 +492,6 @@ vroom_write(auto_preg_log_export, paste0(base_folder, "autotuned_penalized_log_c
 vroom_write(tree_log_export, paste0(base_folder, "tree_log_count.csv"), delim = ",")
 vroom_write(forest_export, paste0(base_folder, "forest_log_count.csv"), delim = ",")
 vroom_write(stack_export, paste0(base_folder, "stacked_log_count.csv"), delim = ",")
+vroom_write(larger_forest_export, paste0(base_folder, "larger_forest_log.csv"), delim = ",")
+vroom_write(better_forest_export, paste0(base_folder, "better_forest.csv"), delim=",")
+vroom_write(bart_export, paste0(base_folder, "bart.csv"), delim=",")
