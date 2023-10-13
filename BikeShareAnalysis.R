@@ -12,7 +12,7 @@ library(DataExplorer)
 library(parsnip)
 
 # Read in the data -----------------------------------
-base_folder <- "C:/Users/BYU Rental/STAT348/KaggleBikeShare/"
+base_folder <- "KaggleBikeShare/"
 bike <- vroom(paste0(base_folder, "train.csv"))
 bike_test <- vroom(paste0(base_folder, "test.csv"))
 
